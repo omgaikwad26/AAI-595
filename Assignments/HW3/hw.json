@@ -1,0 +1,487 @@
+{
+    "cells": [
+     {
+      "cell_type": "markdown",
+      "id": "5a2b7ac0",
+      "metadata": {},
+      "source": [
+       "# CPE 595C Applied Machine Learning Homework #3\n",
+       "### Spring 2025\n",
+       "\n",
+       "In this notebook we implement a decision tree model and optimize it per the assignment instructions. We use the Titanic dataset (Titanic-1.csv) and work through the following steps:\n",
+       "\n",
+       "1. **Data Preparation:** Load data, handle missing values, select features (`pclass`, `sex`, `age`, `sibsp`) and target (`survived`), and split the data into training and test sets.\n",
+       "2. **Data Processing and Initial Analysis:** Discretize the continuous `age` feature using quantile binning and compute information gain for candidate features to determine the optimal first split.\n",
+       "3. **Decision Tree Modeling:** Train a decision tree with a maximum of 20 leaf nodes (using a chosen random state), visualize it, and implement a function to calculate evaluation metrics.\n",
+       "4. **Model Optimization:** Use GridSearchCV to tune `max_leaf_nodes` (from 5 to 20), plot the pruned tree, and report performance.\n",
+       "5. **Advanced Modeling:** Train two additional decision tree models with varying parameters, build an ensemble via majority vote, and train a Random Forest (with 50 estimators) to compare performance.\n"
+      ]
+     },
+     {
+      "cell_type": "code",
+      "execution_count": null,
+      "id": "d4c2f3ee",
+      "metadata": {},
+      "outputs": [],
+      "source": [
+       "# Import necessary libraries\n",
+       "import pandas as pd\n",
+       "import numpy as np\n",
+       "import matplotlib.pyplot as plt\n",
+       "import seaborn as sns\n",
+       "\n",
+       "from sklearn.model_selection import train_test_split, GridSearchCV\n",
+       "from sklearn.tree import DecisionTreeClassifier, plot_tree\n",
+       "from sklearn.ensemble import VotingClassifier, RandomForestClassifier\n",
+       "from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score\n",
+       "\n",
+       "import warnings\n",
+       "warnings.filterwarnings('ignore')\n",
+       "\n",
+       "# For reproducibility, set a base random state (e.g., use your student id number; here we use 12345 as a placeholder)\n",
+       "RANDOM_STATE = 12345"
+      ]
+     },
+     {
+      "cell_type": "code",
+      "execution_count": null,
+      "id": "8e31e5c8",
+      "metadata": {},
+      "outputs": [],
+      "source": [
+       "# Step 1: Data Preparation\n",
+       "# Load the Titanic dataset\n",
+       "# Note: Adjust the file path if needed.\n",
+       "data = pd.read_csv('Titanic-1.csv')\n",
+       "print('Data shape:', data.shape)\n",
+       "print(data.head())"
+      ]
+     },
+     {
+      "cell_type": "code",
+      "execution_count": null,
+      "id": "9fe3b33e",
+      "metadata": {},
+      "outputs": [],
+      "source": [
+       "# 1. Address missing values by imputing with the feature's mean (for numerical columns).\n",
+       "# We assume that only numerical features need imputation (e.g., 'age').\n",
+       "num_cols = ['age']  \n",
+       "for col in num_cols:\n",
+       "    if data[col].isnull().sum() > 0:\n",
+       "        data[col].fillna(data[col].mean(), inplace=True)\n",
+       "\n",
+       "# 2. Select a subset of data with independent variables and the dependent variable\n",
+       "selected_columns = ['pclass', 'sex', 'age', 'sibsp', 'survived']\n",
+       "data = data[selected_columns]\n",
+       "\n",
+       "# 3. Ensure 'survived' is binary (convert if necessary)\n",
+       "data['survived'] = data['survived'].apply(lambda x: 1 if int(x)==1 else 0)\n",
+       "\n",
+       "print('After preprocessing, data sample:')\n",
+       "print(data.head())"
+      ]
+     },
+     {
+      "cell_type": "code",
+      "execution_count": null,
+      "id": "1d6eaba6",
+      "metadata": {},
+      "outputs": [],
+      "source": [
+       "# 4. Split the data into training and test sets (80/20 split)\n",
+       "X = data.drop('survived', axis=1)\n",
+       "y = data['survived']\n",
+       "\n",
+       "X_train, X_test, y_train, y_test = train_test_split(\n",
+       "    X, y, test_size=0.2, random_state=RANDOM_STATE, stratify=y\n",
+       ")\n",
+       "\n",
+       "print('Training set shape:', X_train.shape)\n",
+       "print('Test set shape:', X_test.shape)"
+      ]
+     },
+     {
+      "cell_type": "markdown",
+      "id": "6110d7fa",
+      "metadata": {},
+      "source": [
+       "## Step 2: Data Processing and Initial Analysis\n",
+       "\n",
+       "### 1. Discretize the continuous 'age' attribute using quantile binning\n",
+       "We use `pd.qcut` to bin the 'age' column into quartiles (or any other number of bins as needed)."
+      ]
+     },
+     {
+      "cell_type": "code",
+      "execution_count": null,
+      "id": "60b0a82f",
+      "metadata": {},
+      "outputs": [],
+      "source": [
+       "# Create a copy of training and test data to include binned age\n",
+       "X_train_proc = X_train.copy()\n",
+       "X_test_proc = X_test.copy()\n",
+       "\n",
+       "# For example, create 4 quantile bins for age in both training and test sets\n",
+       "X_train_proc['age_binned'] = pd.qcut(X_train_proc['age'], q=4, duplicates='drop')\n",
+       "\n",
+       "# For the test set, use the same bin edges determined from the training set\n",
+       "age_bins = pd.qcut(X_train['age'], q=4, duplicates='drop').cat.categories\n",
+       "X_test_proc['age_binned'] = pd.cut(X_test_proc['age'], bins=[X_train['age'].min()] + list([b.right for b in age_bins]))\n",
+       "\n",
+       "print('Binned age sample from training set:')\n",
+       "print(X_train_proc[['age', 'age_binned']].head())"
+      ]
+     },
+     {
+      "cell_type": "markdown",
+      "id": "f58b3de3",
+      "metadata": {},
+      "source": [
+       "### 2. Compute Information Gain to Determine the Optimal First Split\n",
+       "\n",
+       "We define a function to compute entropy and then compute information gain for a given feature. We then compute the information gain for each candidate feature (`pclass`, `sex`, `age_binned`, `sibsp`) on the training data."
+      ]
+     },
+     {
+      "cell_type": "code",
+      "execution_count": null,
+      "id": "77f88e6b",
+      "metadata": {},
+      "outputs": [],
+      "source": [
+       "def entropy(y):\n",
+       "    # Compute entropy of a label array\n",
+       "    proportions = np.bincount(y) / len(y)\n",
+       "    # Filter zero probabilities\n",
+       "    proportions = proportions[proportions > 0]\n",
+       "    return -np.sum(proportions * np.log2(proportions))\n",
+       "\n",
+       "def information_gain(X_col, y):\n",
+       "    # Calculate the entropy before split\n",
+       "    original_entropy = entropy(y)\n",
+       "    \n",
+       "    # For a categorical feature, compute weighted entropy after split\n",
+       "    values = X_col.unique()\n",
+       "    weighted_entropy = 0\n",
+       "    for v in values:\n",
+       "        subset_y = y[X_col == v]\n",
+       "        weighted_entropy += (len(subset_y) / len(y)) * entropy(subset_y)\n",
+       "    \n",
+       "    return original_entropy - weighted_entropy\n",
+       "\n",
+       "# Evaluate information gain for each candidate feature on the training data\n",
+       "features = ['pclass', 'sex', 'sibsp', 'age_binned']\n",
+       "ig_results = {}\n",
+       "\n",
+       "# For the purpose of calculation, if a feature is not of type 'object' or 'category', convert to string for grouping\n",
+       "for feature in features:\n",
+       "    col = X_train_proc[feature]\n",
+       "    if not (col.dtype == 'object' or str(col.dtype).startswith('category')):\n",
+       "        col = col.astype(str)\n",
+       "    ig = information_gain(col, y_train.values)\n",
+       "    ig_results[feature] = ig\n",
+       "\n",
+       "print('Information Gain for each candidate feature:')\n",
+       "for feature, ig in ig_results.items():\n",
+       "    print(f\"{feature}: {ig:.4f}\")\n",
+       "\n",
+       "# Determine the optimal first split (feature with the highest information gain)\n",
+       "optimal_feature = max(ig_results, key=ig_results.get)\n",
+       "print(f\"Optimal first split: {optimal_feature}\")"
+      ]
+     },
+     {
+      "cell_type": "markdown",
+      "id": "d74a98bf",
+      "metadata": {},
+      "source": [
+       "## Step 3: Decision Tree Modeling\n",
+       "\n",
+       "### 1. Train a Decision Tree Model\n",
+       "\n",
+       "We train a decision tree classifier using scikit‑learn with a maximum of 20 leaf nodes. (The `random_state` is set to our chosen student id number, here `12345`.)"
+      ]
+     },
+     {
+      "cell_type": "code",
+      "execution_count": null,
+      "id": "47c57411",
+      "metadata": {},
+      "outputs": [],
+      "source": [
+       "# For modeling, we need to convert categorical variables to numeric (one-hot encoding for 'sex' and 'age_binned')\n",
+       "X_train_model = X_train_proc.copy()\n",
+       "X_test_model = X_test_proc.copy()\n",
+       "\n",
+       "# Drop the original 'age' column if desired (or keep for reference) but use the discretized 'age_binned'\n",
+       "X_train_model = X_train_model.drop('age', axis=1)\n",
+       "X_test_model = X_test_model.drop('age', axis=1)\n",
+       "\n",
+       "# One-hot encode categorical features: 'sex' and 'age_binned'\n",
+       "X_train_model = pd.get_dummies(X_train_model, columns=['sex', 'age_binned'], drop_first=True)\n",
+       "X_test_model = pd.get_dummies(X_test_model, columns=['sex', 'age_binned'], drop_first=True)\n",
+       "\n",
+       "# Ensure both train and test sets have the same dummy columns\n",
+       "X_test_model = X_test_model.reindex(columns=X_train_model.columns, fill_value=0)\n",
+       "\n",
+       "# Initialize and train the decision tree classifier\n",
+       "dt_clf = DecisionTreeClassifier(max_leaf_nodes=20, random_state=RANDOM_STATE)\n",
+       "dt_clf.fit(X_train_model, y_train)\n",
+       "\n",
+       "print('Trained Decision Tree Model')"
+      ]
+     },
+     {
+      "cell_type": "markdown",
+      "id": "b651531e",
+      "metadata": {},
+      "source": [
+       "### 2. Visualize the Complete Tree"
+      ]
+     },
+     {
+      "cell_type": "code",
+      "execution_count": null,
+      "id": "efb63be8",
+      "metadata": {},
+      "outputs": [],
+      "source": [
+       "plt.figure(figsize=(20,10))\n",
+       "plot_tree(dt_clf, feature_names=X_train_model.columns, filled=True, rounded=True, fontsize=10)\n",
+       "plt.title('Decision Tree with max_leaf_nodes = 20')\n",
+       "plt.show()"
+      ]
+     },
+     {
+      "cell_type": "markdown",
+      "id": "b2c59a10",
+      "metadata": {},
+      "source": [
+       "### 3. Evaluation Function\n",
+       "\n",
+       "Implement a function to calculate accuracy, precision, recall, and F1 score on the test set."
+      ]
+     },
+     {
+      "cell_type": "code",
+      "execution_count": null,
+      "id": "f645f7a3",
+      "metadata": {},
+      "outputs": [],
+      "source": [
+       "def evaluate_model(model, X_test, y_test):\n",
+       "    y_pred = model.predict(X_test)\n",
+       "    acc = accuracy_score(y_test, y_pred)\n",
+       "    prec = precision_score(y_test, y_pred)\n",
+       "    rec = recall_score(y_test, y_pred)\n",
+       "    f1 = f1_score(y_test, y_pred)\n",
+       "    \n",
+       "    print(f\"Accuracy: {acc:.4f}\")\n",
+       "    print(f\"Precision: {prec:.4f}\")\n",
+       "    print(f\"Recall: {rec:.4f}\")\n",
+       "    print(f\"F1 Score: {f1:.4f}\")\n",
+       "    return acc, prec, rec, f1\n",
+       "\n",
+       "# Evaluate the initial decision tree model\n",
+       "print('Performance of initial Decision Tree:')\n",
+       "evaluate_model(dt_clf, X_test_model, y_test)"
+      ]
+     },
+     {
+      "cell_type": "markdown",
+      "id": "1c6eac87",
+      "metadata": {},
+      "source": [
+       "## Step 4: Model Optimization\n",
+       "\n",
+       "### 1. Use GridSearchCV to Tune max_leaf_nodes (from 5 to 20) for Tree Pruning\n",
+       "We perform a grid search to determine the optimal number of leaf nodes."
+      ]
+     },
+     {
+      "cell_type": "code",
+      "execution_count": null,
+      "id": "9e6e3c9e",
+      "metadata": {},
+      "outputs": [],
+      "source": [
+       "# Define parameter grid for max_leaf_nodes\n",
+       "param_grid = {'max_leaf_nodes': list(range(5, 21))}\n",
+       "\n",
+       "grid_search = GridSearchCV(\n",
+       "    DecisionTreeClassifier(random_state=RANDOM_STATE),\n",
+       "    param_grid,\n",
+       "    cv=5,\n",
+       "    scoring='accuracy'\n",
+       ")\n",
+       "\n",
+       "grid_search.fit(X_train_model, y_train)\n",
+       "\n",
+       "print('Best parameters from GridSearchCV:', grid_search.best_params_)\n",
+       "print('Best cross-validation accuracy:', grid_search.best_score_)\n",
+       "\n",
+       "# Retrieve the best estimator (pruned tree)\n",
+       "best_dt = grid_search.best_estimator_\n",
+       "\n",
+       "# Evaluate on test set\n",
+       "print('\\nPerformance of the Pruned Decision Tree:')\n",
+       "evaluate_model(best_dt, X_test_model, y_test)"
+      ]
+     },
+     {
+      "cell_type": "markdown",
+      "id": "1b84b74d",
+      "metadata": {},
+      "source": [
+       "### 2. Visualize the Pruned Tree"
+      ]
+     },
+     {
+      "cell_type": "code",
+      "execution_count": null,
+      "id": "29ec7abf",
+      "metadata": {},
+      "outputs": [],
+      "source": [
+       "plt.figure(figsize=(20,10))\n",
+       "plot_tree(best_dt, feature_names=X_train_model.columns, filled=True, rounded=True, fontsize=10)\n",
+       "plt.title('Pruned Decision Tree (GridSearchCV optimal max_leaf_nodes)')\n",
+       "plt.show()"
+      ]
+     },
+     {
+      "cell_type": "markdown",
+      "id": "3756f3f1",
+      "metadata": {},
+      "source": [
+       "## Step 5: Advanced Modeling\n",
+       "\n",
+       "### 1. Construct Two Additional Decision Tree Models with Varying Parameters\n",
+       "\n",
+       "For example, we build:\n",
+       "\n",
+       "- A tree with a fixed maximum depth (e.g. `max_depth=5`)\n",
+       "- A tree that uses the 'entropy' criterion instead of the default 'gini'\n"
+      ]
+     },
+     {
+      "cell_type": "code",
+      "execution_count": null,
+      "id": "7e8e8ee3",
+      "metadata": {},
+      "outputs": [],
+      "source": [
+       "# Additional Decision Tree Model 1: Limit maximum depth\n",
+       "dt_depth = DecisionTreeClassifier(max_depth=5, random_state=RANDOM_STATE)\n",
+       "dt_depth.fit(X_train_model, y_train)\n",
+       "\n",
+       "# Additional Decision Tree Model 2: Use entropy as the splitting criterion\n",
+       "dt_entropy = DecisionTreeClassifier(criterion='entropy', random_state=RANDOM_STATE)\n",
+       "dt_entropy.fit(X_train_model, y_train)\n",
+       "\n",
+       "print('Performance of Decision Tree with max_depth=5:')\n",
+       "evaluate_model(dt_depth, X_test_model, y_test)\n",
+       "\n",
+       "print('\\nPerformance of Decision Tree with criterion=entropy:')\n",
+       "evaluate_model(dt_entropy, X_test_model, y_test)"
+      ]
+     },
+     {
+      "cell_type": "markdown",
+      "id": "a5a6ea9d",
+      "metadata": {},
+      "source": [
+       "### 2. Ensemble Learning via Majority Vote\n",
+       "\n",
+       "We combine the three decision tree models (the pruned tree from GridSearchCV, the tree with max_depth=5, and the tree using entropy) using a majority vote classifier."
+      ]
+     },
+     {
+      "cell_type": "code",
+      "execution_count": null,
+      "id": "1ec25dd4",
+      "metadata": {},
+      "outputs": [],
+      "source": [
+       "ensemble = VotingClassifier(\n",
+       "    estimators=[\n",
+       "        ('pruned', best_dt),\n",
+       "        ('depth', dt_depth),\n",
+       "        ('entropy', dt_entropy)\n",
+       "    ],\n",
+       "    voting='hard'\n",
+       ")\n",
+       "\n",
+       "ensemble.fit(X_train_model, y_train)\n",
+       "\n",
+       "print('Performance of the Ensemble Model (Majority Vote):')\n",
+       "evaluate_model(ensemble, X_test_model, y_test)"
+      ]
+     },
+     {
+      "cell_type": "markdown",
+      "id": "75ec26d2",
+      "metadata": {},
+      "source": [
+       "### 3. Random Forest Model\n",
+       "\n",
+       "We train a RandomForestClassifier using the optimal tree size found from GridSearchCV (i.e. the best max_leaf_nodes) and set `n_estimators=50`. We then compare its performance with that of our ensemble."
+      ]
+     },
+     {
+      "cell_type": "code",
+      "execution_count": null,
+      "id": "aa9c52b5",
+      "metadata": {},
+      "outputs": [],
+      "source": [
+       "# Retrieve the optimal max_leaf_nodes from grid search\n",
+       "optimal_leaf_nodes = grid_search.best_params_['max_leaf_nodes']\n",
+       "\n",
+       "# Train the Random Forest\n",
+       "rf_clf = RandomForestClassifier(\n",
+       "    n_estimators=50,\n",
+       "    max_leaf_nodes=optimal_leaf_nodes,\n",
+       "    random_state=RANDOM_STATE\n",
+       ")\n",
+       "rf_clf.fit(X_train_model, y_train)\n",
+       "\n",
+       "print('Performance of the Random Forest Model:')\n",
+       "evaluate_model(rf_clf, X_test_model, y_test)"
+      ]
+     },
+     {
+      "cell_type": "markdown",
+      "id": "fbaf1ed1",
+      "metadata": {},
+      "source": [
+       "## Summary\n",
+       "\n",
+       "We have built and optimized several decision tree models on the Titanic dataset. \n",
+       "\n",
+       "- The initial decision tree with 20 leaf nodes was visualized and evaluated.\n",
+       "- GridSearchCV helped us find the optimal number of leaf nodes for a pruned tree.\n",
+       "- Two additional trees were built using different hyperparameters, and an ensemble model was created using majority vote.\n",
+       "- Finally, a Random Forest model was trained (with 50 trees) and its performance compared.\n",
+       "\n",
+       "Examine the outputs and plots for further insights into model performance."
+      ]
+     }
+    ],
+    "metadata": {
+     "kernelspec": {
+      "display_name": "Python 3",
+      "language": "python",
+      "name": "python3"
+     },
+     "language_info": {
+      "name": "python",
+      "version": "3.x"
+     }
+    },
+    "nbformat": 4,
+    "nbformat_minor": 5
+   }
+   
